@@ -56,6 +56,7 @@ class MemoryRepository implements RecordRepository {
   async setPublicLink(id: string, tokenHash: string, tokenCiphertext: string, createdAt: string, expectedHash: string | null) { const found = await this.findById(id); if (!found || found.public_link_token_hash !== expectedHash) return null; Object.assign(found, { public_link_token_hash: tokenHash, public_link_token_ciphertext: tokenCiphertext, public_link_created_at: createdAt }); return found; }
   async revokePublicLink(id: string) { const found = await this.findById(id); if (!found) return null; Object.assign(found, { public_link_token_hash: null, public_link_token_ciphertext: null, public_link_created_at: null }); return found; }
   async setProfilePhotoPath(id: string, path: string | null) { const found = await this.findById(id); if (!found) return null; found.profile_photo_path = path; return found; }
+  async delete(id: string) { const index = this.records.findIndex((item) => item.id === id); if (index < 0) return null; return this.records.splice(index, 1)[0]; }
 }
 
 class MemoryProfilePhotoStore implements ProfilePhotoStore {
@@ -240,6 +241,51 @@ describe("profile photo contracts", () => {
     expect(response.status).toBe(204);
     expect(repository.records[0].profile_photo_path).toBeNull();
     expect(logs).toContainEqual(expect.objectContaining({ event: "profile_photo_cleanup_failed" }));
+  });
+});
+
+describe("record deletion contracts", () => {
+  it("permanently deletes the record, revokes public access and removes its photo", async () => {
+    const { app, repository, profilePhotoStore } = setup();
+    const record = repository.records[0];
+    const token = generatePublicLinkToken();
+    await repository.setPublicLink(record.id, hashPublicLinkToken(token, publicLinkSecret), encryptPublicLinkToken(token, publicLinkSecret), new Date().toISOString(), null);
+    record.profile_photo_path = `${record.id}/00000000-0000-4000-8000-000000000000.webp`;
+    profilePhotoStore.files.set(record.profile_photo_path, Buffer.from("photo"));
+    const path = `/api/v1/admin/records/${record.id}`;
+
+    expect((await request(app).delete(path).set("authorization", "Bearer valid")).status).toBe(204);
+    expect(repository.records).toHaveLength(0);
+    expect(profilePhotoStore.files.size).toBe(0);
+    expect((await request(app).post("/api/v1/protocols/lookup").send({ protocol })).status).toBe(404);
+    expect((await request(app).post("/api/v1/public-links/resolve").send({ token })).status).toBe(404);
+    const repeated = await request(app).delete(path).set("authorization", "Bearer valid");
+    expect(repeated.status).toBe(404);
+    expect(repeated.body.error.code).toBe("RECORD_NOT_FOUND");
+  });
+
+  it("protects deletion and validates the record id", async () => {
+    const { app, repository } = setup();
+    const path = `/api/v1/admin/records/${repository.records[0].id}`;
+    expect((await request(app).delete(path)).status).toBe(401);
+    expect((await request(app).delete(path).set("authorization", "Bearer invalid")).status).toBe(403);
+    expect((await request(app).delete("/api/v1/admin/records/not-a-uuid").set("authorization", "Bearer valid")).status).toBe(400);
+    expect(repository.records).toHaveLength(1);
+  });
+
+  it("keeps deletion successful and logs safely when photo cleanup fails", async () => {
+    const { app, repository, profilePhotoStore, logs } = setup();
+    const record = repository.records[0];
+    record.profile_photo_path = `${record.id}/00000000-0000-4000-8000-000000000000.webp`;
+    profilePhotoStore.failRemove = true;
+
+    const response = await request(app).delete(`/api/v1/admin/records/${record.id}`).set("authorization", "Bearer valid");
+
+    expect(response.status).toBe(204);
+    expect(repository.records).toHaveLength(0);
+    expect(logs).toContainEqual(expect.objectContaining({ event: "record_profile_photo_cleanup_failed" }));
+    expect(JSON.stringify(logs)).not.toContain(record.profile_photo_path);
+    expect(JSON.stringify(logs)).not.toContain(record.student_name);
   });
 });
 

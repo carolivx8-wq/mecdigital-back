@@ -12,6 +12,7 @@ export interface RecordRepository {
   setPublicLink(id: string, tokenHash: string, tokenCiphertext: string, createdAt: string, expectedHash: string | null): Promise<EducationRecord | null>;
   revokePublicLink(id: string): Promise<EducationRecord | null>;
   setProfilePhotoPath(id: string, path: string | null): Promise<EducationRecord | null>;
+  delete(id: string): Promise<Pick<EducationRecord, "profile_photo_path"> | null>;
 }
 
 export class SupabaseRecordRepository implements RecordRepository {
@@ -124,5 +125,16 @@ export class SupabaseRecordRepository implements RecordRepository {
       .maybeSingle();
     if (error) throw error;
     return data as EducationRecord | null;
+  }
+
+  async delete(id: string): Promise<Pick<EducationRecord, "profile_photo_path"> | null> {
+    const { data, error } = await this.client
+      .from("education_records")
+      .delete()
+      .eq("id", id)
+      .select("profile_photo_path")
+      .maybeSingle();
+    if (error) throw error;
+    return data as Pick<EducationRecord, "profile_photo_path"> | null;
   }
 }

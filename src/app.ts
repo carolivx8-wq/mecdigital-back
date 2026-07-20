@@ -207,6 +207,35 @@ export function createApp(deps: AppDependencies) {
     } catch (error) { next(error); }
   });
 
+  app.delete("/api/v1/admin/records/:id", requireAdmin, async (req, res, next) => {
+    try {
+      const deleted = await deps.repository.delete(recordIdSchema.parse(String(req.params.id)));
+      if (!deleted) return res.status(404).json(errorBody("RECORD_NOT_FOUND", "Registro não encontrado.", res.locals.requestId));
+      if (deleted.profile_photo_path) {
+        if (!deps.profilePhotoStore) {
+          (deps.log ?? console.error)({ level: "error", event: "record_profile_photo_cleanup_failed", requestId: res.locals.requestId, errorType: "storage_unavailable" });
+        } else {
+          await deps.profilePhotoStore.remove(deleted.profile_photo_path).catch((error: unknown) => {
+            (deps.log ?? console.error)({
+              level: "error",
+              event: "record_profile_photo_cleanup_failed",
+              requestId: res.locals.requestId,
+              errorType: error instanceof Error ? error.name : "unknown"
+            });
+          });
+        }
+      }
+      (deps.log ?? console.info)({
+        level: "info",
+        event: "record_deleted",
+        requestId: res.locals.requestId,
+        recordId: req.params.id,
+        adminUserId: res.locals.adminUserId
+      });
+      return res.status(204).send();
+    } catch (error) { next(error); }
+  });
+
   app.put(
     "/api/v1/admin/records/:id/profile-photo",
     requireAdmin,
