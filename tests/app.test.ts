@@ -36,6 +36,7 @@ function fixture(overrides: Partial<EducationRecord> = {}): EducationRecord {
 
 class MemoryRepository implements RecordRepository {
   records = [fixture()];
+  async findByProtocolHash(hash: string) { return this.records.find((item) => item.protocol_hash === hash) ?? null; }
   async findActiveByProtocolHash(hash: string) { return this.records.find((item) => item.protocol_hash === hash && item.status === "active") ?? null; }
   async create(input: CreateRecordInput, protocolHash: string, protocolCiphertext: string, userId: string) { const record = fixture({ ...input, protocol_hash: protocolHash, protocol_ciphertext: protocolCiphertext, created_by: userId }); this.records.push(record); return record; }
   async list(_page: number, _pageSize: number, search: string) { const items = this.records.filter((item) => item.student_name.toLowerCase().includes(search.toLowerCase())); return { items, total: items.length }; }
@@ -85,16 +86,18 @@ describe("public protocol contracts", () => {
     expect(response.body.data).not.toHaveProperty("protocol_ciphertext");
     expect(response.body.data).not.toHaveProperty("created_by");
     expect(response.body.data.downloads).toEqual({ pdf: "blocked", xml: "blocked" });
+    expect(response.body.data.blocked).toBe(false);
   });
 
-  it("uses the same not-found response for missing and archived records", async () => {
+  it("returns archived record data with the blocked marker", async () => {
     const { app, repository } = setup();
     const missing = await request(app).post("/api/v1/protocols/lookup").send({ protocol: "MEC-AAAAAAAAAAAAAAAAAAAAAAAA" });
     repository.records[0].status = "archived";
     const archived = await request(app).post("/api/v1/protocols/lookup").send({ protocol });
     expect(missing.status).toBe(404);
-    expect(archived.status).toBe(404);
-    expect(missing.body.error.code).toBe(archived.body.error.code);
+    expect(archived.status).toBe(200);
+    expect(archived.body.data.student.name).toBe("Samara Maria Teixeira Fernandes");
+    expect(archived.body.data.blocked).toBe(true);
   });
 
   it.each(["pdf", "xml"])("blocks %s downloads at the API", async (format) => {
@@ -172,7 +175,7 @@ describe("admin contracts", () => {
     }
   });
 
-  it("archives a record and removes it from public lookup", async () => {
+  it("archives a record and marks it blocked in public lookup", async () => {
     const { app, repository } = setup();
     const archived = await request(app)
       .patch(`/api/v1/admin/records/${repository.records[0].id}`)
@@ -181,7 +184,8 @@ describe("admin contracts", () => {
     expect(archived.status).toBe(200);
     expect(archived.body.data.status).toBe("archived");
     const lookup = await request(app).post("/api/v1/protocols/lookup").send({ protocol });
-    expect(lookup.status).toBe(404);
+    expect(lookup.status).toBe(200);
+    expect(lookup.body.data.blocked).toBe(true);
   });
 
   it("blocks and unblocks a record through the existing status contract", async () => {
@@ -191,11 +195,15 @@ describe("admin contracts", () => {
     expect((await request(app).patch(recordPath).set("authorization", "Bearer invalid").send({ status: "archived" })).status).toBe(403);
     expect((await request(app).patch(recordPath).set("authorization", "Bearer valid").send({ status: "blocked" })).status).toBe(400);
     expect((await request(app).patch(recordPath).set("authorization", "Bearer valid").send({ status: "archived" })).status).toBe(200);
-    expect((await request(app).post("/api/v1/protocols/lookup").send({ protocol })).status).toBe(404);
+    const blockedLookup = await request(app).post("/api/v1/protocols/lookup").send({ protocol });
+    expect(blockedLookup.status).toBe(200);
+    expect(blockedLookup.body.data.blocked).toBe(true);
     const unblocked = await request(app).patch(recordPath).set("authorization", "Bearer valid").send({ status: "active" });
     expect(unblocked.status).toBe(200);
     expect(unblocked.body.data.status).toBe("active");
-    expect((await request(app).post("/api/v1/protocols/lookup").send({ protocol })).status).toBe(200);
+    const activeLookup = await request(app).post("/api/v1/protocols/lookup").send({ protocol });
+    expect(activeLookup.status).toBe(200);
+    expect(activeLookup.body.data.blocked).toBe(false);
   });
 });
 

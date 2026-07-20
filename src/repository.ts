@@ -2,6 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { CreateRecordInput, EducationRecord, UpdateRecordInput } from "./types.js";
 
 export interface RecordRepository {
+  findByProtocolHash(hash: string): Promise<EducationRecord | null>;
   findActiveByProtocolHash(hash: string): Promise<EducationRecord | null>;
   create(input: CreateRecordInput, protocolHash: string, protocolCiphertext: string, userId: string): Promise<EducationRecord>;
   list(page: number, pageSize: number, search: string): Promise<{ items: EducationRecord[]; total: number }>;
@@ -11,6 +12,16 @@ export interface RecordRepository {
 
 export class SupabaseRecordRepository implements RecordRepository {
   constructor(private readonly client: SupabaseClient) {}
+
+  async findByProtocolHash(hash: string): Promise<EducationRecord | null> {
+    const { data, error } = await this.client
+      .from("education_records")
+      .select("*")
+      .eq("protocol_hash", hash)
+      .maybeSingle();
+    if (error) throw error;
+    return data as EducationRecord | null;
+  }
 
   async findActiveByProtocolHash(hash: string): Promise<EducationRecord | null> {
     const { data, error } = await this.client
