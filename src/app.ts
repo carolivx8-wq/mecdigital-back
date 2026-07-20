@@ -75,6 +75,11 @@ export function createApp(deps: AppDependencies) {
     } catch (error) { next(error); }
   });
 
+  app.use("/api/v1/protocols", (_req, res, next) => {
+    res.setHeader("cache-control", "private, no-store");
+    next();
+  });
+
   app.put(
     "/api/v1/admin/branding/logo",
     requireAdmin,
@@ -121,7 +126,6 @@ export function createApp(deps: AppDependencies) {
         if (blockedRecord?.status === "archived") return res.status(423).json(errorBody("PROTOCOL_BLOCKED", "Protocolo bloqueado temporariamente! Consulte sua instituição!", res.locals.requestId));
         return res.status(404).json(errorBody("PROTOCOL_NOT_FOUND", "Protocolo não encontrado.", res.locals.requestId));
       }
-      res.setHeader("cache-control", "private, no-store");
       return res.json({ data: toPublicRecord(record) });
     } catch (error) { next(error); }
   });

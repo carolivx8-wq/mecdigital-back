@@ -19,6 +19,7 @@ function fixture(overrides: Partial<EducationRecord> = {}): EducationRecord {
     birth_date: "1979-03-16",
     document_type: "RG",
     document_number: "35383438",
+    additional_documents: [{ document_type: "CPF", document_number: "12345678910" }],
     mother_name: "Zilma Teixeira de Farias",
     father_name: "Paulo Fernandes de Farias",
     education_level: "Enfermagem (Bacharelado)",
@@ -77,6 +78,10 @@ describe("public protocol contracts", () => {
     expect(response.status).toBe(200);
     expect(response.body.data.student.name).toBe("Samara Maria Teixeira Fernandes");
     expect(response.body.data.student.documentNumber).toBe("35383438");
+    expect(response.body.data.student.documents).toEqual([
+      { type: "RG", number: "35383438" },
+      { type: "CPF", number: "12345678910" }
+    ]);
     expect(response.body.data.student.birthDate).toBe("1979-03-16");
     expect(response.body.data.student.motherName).toBe("Zilma Teixeira de Farias");
     expect(response.body.data.student.fatherName).toBe("Paulo Fernandes de Farias");
@@ -94,15 +99,20 @@ describe("public protocol contracts", () => {
     repository.records[0].status = "archived";
     const archived = await request(app).post("/api/v1/protocols/lookup").send({ protocol });
     expect(missing.status).toBe(404);
+    expect(missing.headers["cache-control"]).toBe("private, no-store");
     expect(archived.status).toBe(423);
+    expect(archived.headers["cache-control"]).toBe("private, no-store");
     expect(archived.body.error.code).toBe("PROTOCOL_BLOCKED");
     expect(archived.body).not.toHaveProperty("data");
+    expect(JSON.stringify(archived.body)).not.toContain(repository.records[0].student_name);
+    expect(JSON.stringify(archived.body)).not.toContain(repository.records[0].document_number);
   });
 
   it.each(["pdf", "xml"])("blocks %s downloads at the API", async (format) => {
     const { app } = setup();
     const response = await request(app).post("/api/v1/protocols/download-attempt").send({ protocol, format });
     expect(response.status).toBe(423);
+    expect(response.headers["cache-control"]).toBe("private, no-store");
     expect(response.body.error.code).toBe("PROTOCOL_BLOCKED");
     expect(response.body).not.toHaveProperty("url");
   });
@@ -151,6 +161,25 @@ describe("admin contracts", () => {
     expect(response.body.data.record).not.toHaveProperty("protocol_ciphertext");
     expect(response.body.data.record).not.toHaveProperty("created_by");
     expect(response.body.data.record.protocol).toBe(protocol);
+    expect(response.body.data.record.additional_documents).toEqual([{ document_type: "CPF", document_number: "12345678910" }]);
+  });
+
+  it("rejects more than nine additional documents", async () => {
+    const { app } = setup();
+    const source = fixture();
+    const { id, protocol_hash, protocol_ciphertext, status, created_at, updated_at, created_by, ...input } = source;
+    const response = await request(app)
+      .post("/api/v1/admin/records")
+      .set("authorization", "Bearer valid")
+      .send({
+        ...input,
+        additional_documents: Array.from({ length: 10 }, (_, index) => ({
+          document_type: "OTHER",
+          document_number: `DOC-${index + 1}`
+        }))
+      });
+    expect(response.status).toBe(400);
+    expect(response.body.error.code).toBe("VALIDATION_ERROR");
   });
 
   it("returns the decrypted protocol only to the admin list", async () => {
@@ -194,6 +223,7 @@ describe("admin contracts", () => {
     expect((await request(app).patch(recordPath).set("authorization", "Bearer invalid").send({ status: "archived" })).status).toBe(403);
     expect((await request(app).patch(recordPath).set("authorization", "Bearer valid").send({ status: "blocked" })).status).toBe(400);
     expect((await request(app).patch(recordPath).set("authorization", "Bearer valid").send({ status: "archived" })).status).toBe(200);
+    expect(repository.records[0].additional_documents).toEqual([{ document_type: "CPF", document_number: "12345678910" }]);
     const blockedLookup = await request(app).post("/api/v1/protocols/lookup").send({ protocol });
     expect(blockedLookup.status).toBe(423);
     expect(blockedLookup.body.error.code).toBe("PROTOCOL_BLOCKED");

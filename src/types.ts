@@ -1,4 +1,10 @@
 export type RecordStatus = "active" | "archived";
+export type EducationDocumentType = "RG" | "RNE" | "CPF" | "OTHER";
+
+export interface EducationDocument {
+  document_type: EducationDocumentType;
+  document_number: string;
+}
 
 export interface EducationRecord {
   id: string;
@@ -7,8 +13,9 @@ export interface EducationRecord {
   status: RecordStatus;
   student_name: string;
   birth_date: string;
-  document_type: "RG" | "RNE" | "CPF" | "OTHER";
+  document_type: EducationDocumentType;
   document_number: string;
+  additional_documents: EducationDocument[];
   mother_name: string | null;
   father_name: string | null;
   education_level: string;
@@ -36,6 +43,7 @@ export interface PublicRecord {
     birthDate: string;
     documentType: EducationRecord["document_type"];
     documentNumber: string;
+    documents: Array<{ type: EducationDocumentType; number: string }>;
     motherName: string | null;
     fatherName: string | null;
     educationLevel: string;

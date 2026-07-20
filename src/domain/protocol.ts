@@ -1,4 +1,5 @@
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes } from "node:crypto";
+import { educationDocumentsSchema } from "../schemas.js";
 import type { EducationRecord, PublicRecord } from "../types.js";
 
 const PROTOCOL_PATTERN = /^MEC-[A-F0-9]{24}$/;
@@ -41,6 +42,7 @@ export function decryptProtocol(payload: string, pepper: string): string {
 }
 
 export function toPublicRecord(record: EducationRecord): PublicRecord {
+  const additionalDocuments = educationDocumentsSchema.parse(record.additional_documents ?? []);
   return {
     consultedAt: new Date().toISOString(),
     student: {
@@ -48,6 +50,13 @@ export function toPublicRecord(record: EducationRecord): PublicRecord {
       birthDate: record.birth_date,
       documentType: record.document_type,
       documentNumber: record.document_number,
+      documents: [
+        { type: record.document_type, number: record.document_number },
+        ...additionalDocuments.map((document) => ({
+          type: document.document_type,
+          number: document.document_number
+        }))
+      ],
       motherName: record.mother_name,
       fatherName: record.father_name,
       educationLevel: record.education_level,

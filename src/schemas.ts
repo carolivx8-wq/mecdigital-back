@@ -8,11 +8,19 @@ export const downloadAttemptSchema = protocolSchema.extend({
   format: z.enum(["pdf", "xml"])
 });
 
+export const educationDocumentSchema = z.object({
+  document_type: z.enum(["RG", "RNE", "CPF", "OTHER"]),
+  document_number: z.string().trim().min(3).max(40)
+}).strict();
+
+export const educationDocumentsSchema = z.array(educationDocumentSchema).max(9);
+
 export const recordInputSchema = z.object({
   student_name: z.string().trim().min(3).max(180),
   birth_date: z.iso.date(),
   document_type: z.enum(["RG", "RNE", "CPF", "OTHER"]),
   document_number: z.string().trim().min(3).max(40),
+  additional_documents: educationDocumentsSchema.default([]),
   mother_name: z.string().trim().min(3).max(180).nullable().default(null),
   father_name: z.string().trim().min(3).max(180).nullable().default(null),
   education_level: z.string().trim().min(2).max(180),
@@ -21,9 +29,15 @@ export const recordInputSchema = z.object({
   institution_name: z.string().trim().min(3).max(220),
   institution_creation_act: z.string().trim().max(1000).nullable().default(null),
   publication_text: z.string().trim().max(1000).nullable().default(null)
-});
+}).strict();
 
 export const recordPatchSchema = recordInputSchema.partial().extend({
+  additional_documents: educationDocumentsSchema.optional(),
+  mother_name: z.string().trim().min(3).max(180).nullable().optional(),
+  father_name: z.string().trim().min(3).max(180).nullable().optional(),
+  notes: z.string().trim().max(1000).nullable().optional(),
+  institution_creation_act: z.string().trim().max(1000).nullable().optional(),
+  publication_text: z.string().trim().max(1000).nullable().optional(),
   status: z.enum(["active", "archived"]).optional()
 });
 
