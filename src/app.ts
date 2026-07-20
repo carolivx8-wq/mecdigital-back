@@ -115,10 +115,14 @@ export function createApp(deps: AppDependencies) {
   app.post("/api/v1/protocols/lookup", publicLimiter, async (req, res, next) => {
     try {
       const { protocol } = protocolSchema.parse(req.body);
-      const record = await deps.repository.findByProtocolHash(hashProtocol(protocol, deps.protocolPepper));
-      if (!record) return res.status(404).json(errorBody("PROTOCOL_NOT_FOUND", "Protocolo não encontrado.", res.locals.requestId));
+      const record = await deps.repository.findActiveByProtocolHash(hashProtocol(protocol, deps.protocolPepper));
+      if (!record) {
+        const blockedRecord = await deps.repository.findByProtocolHash(hashProtocol(protocol, deps.protocolPepper));
+        if (blockedRecord?.status === "archived") return res.status(423).json(errorBody("PROTOCOL_BLOCKED", "Protocolo bloqueado temporariamente! Consulte sua instituição!", res.locals.requestId));
+        return res.status(404).json(errorBody("PROTOCOL_NOT_FOUND", "Protocolo não encontrado.", res.locals.requestId));
+      }
       res.setHeader("cache-control", "private, no-store");
-      return res.json({ data: { ...toPublicRecord(record), blocked: record.status === "archived" } });
+      return res.json({ data: toPublicRecord(record) });
     } catch (error) { next(error); }
   });
 
