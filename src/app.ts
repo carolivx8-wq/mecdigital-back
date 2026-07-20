@@ -72,10 +72,10 @@ export function createApp(deps: AppDependencies) {
 
   const publicLimiter = rateLimit({ windowMs: 60_000, limit: 30, standardHeaders: "draft-8", legacyHeaders: false });
   const requireAdmin = async (req: Request, res: Response, next: NextFunction) => {
+    res.setHeader("cache-control", "private, no-store");
     const userId = await deps.authorizeAdmin(req.header("authorization"));
     if (!userId) return res.status(req.header("authorization") ? 403 : 401).json(errorBody("ADMIN_REQUIRED", "Acesso administrativo necessário.", res.locals.requestId));
     res.locals.adminUserId = userId;
-    res.setHeader("cache-control", "private, no-store");
     next();
   };
   const signedProfilePhoto = async (record: { profile_photo_path: string | null }) =>

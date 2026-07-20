@@ -267,7 +267,9 @@ describe("record deletion contracts", () => {
   it("protects deletion and validates the record id", async () => {
     const { app, repository } = setup();
     const path = `/api/v1/admin/records/${repository.records[0].id}`;
-    expect((await request(app).delete(path)).status).toBe(401);
+    const unauthorized = await request(app).delete(path);
+    expect(unauthorized.status).toBe(401);
+    expect(unauthorized.headers["cache-control"]).toBe("private, no-store");
     expect((await request(app).delete(path).set("authorization", "Bearer invalid")).status).toBe(403);
     expect((await request(app).delete("/api/v1/admin/records/not-a-uuid").set("authorization", "Bearer valid")).status).toBe(400);
     expect(repository.records).toHaveLength(1);
