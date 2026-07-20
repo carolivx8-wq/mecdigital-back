@@ -1,6 +1,6 @@
 # MecDigital Back
 
-API Express/TypeScript para Vercel Functions. É a autoridade de protocolos, mascaramento, autorização e bloqueio de downloads.
+API Express/TypeScript para Vercel Functions. É a autoridade de protocolos, projeção do DTO público, autorização, status dos registros e bloqueio de downloads.
 
 ## Local
 
@@ -20,4 +20,3 @@ npm audit
 ```
 
 `SUPABASE_SERVICE_ROLE_KEY` e `PROTOCOL_PEPPER` são secrets exclusivos do backend.
-

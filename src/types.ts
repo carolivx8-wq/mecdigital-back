@@ -30,6 +30,7 @@ export type CreateRecordInput = Omit<
 export type UpdateRecordInput = Partial<CreateRecordInput> & { status?: RecordStatus };
 
 export interface PublicRecord {
+  consultedAt: string;
   student: {
     name: string;
     birthDate: string;

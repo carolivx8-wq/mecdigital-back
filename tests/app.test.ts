@@ -69,13 +69,21 @@ function setup(admin = true) {
 }
 
 describe("public protocol contracts", () => {
-  it("returns a masked public record", async () => {
+  it("returns the approved public fields in full with a consultation timestamp and no-store", async () => {
     const { app } = setup();
+    const startedAt = Date.now();
     const response = await request(app).post("/api/v1/protocols/lookup").send({ protocol });
     expect(response.status).toBe(200);
-    expect(response.body.data.student.name).not.toBe("Samara Maria Teixeira Fernandes");
-    expect(response.body.data.student.documentNumber).toBe("***3438");
-    expect(response.body.data.student.birthDate).toBe("**/**/1979");
+    expect(response.body.data.student.name).toBe("Samara Maria Teixeira Fernandes");
+    expect(response.body.data.student.documentNumber).toBe("35383438");
+    expect(response.body.data.student.birthDate).toBe("1979-03-16");
+    expect(response.body.data.student.motherName).toBe("Zilma Teixeira de Farias");
+    expect(response.body.data.student.fatherName).toBe("Paulo Fernandes de Farias");
+    expect(new Date(response.body.data.consultedAt).getTime()).toBeGreaterThanOrEqual(startedAt);
+    expect(response.headers["cache-control"]).toBe("private, no-store");
+    expect(response.body.data).not.toHaveProperty("protocol_hash");
+    expect(response.body.data).not.toHaveProperty("protocol_ciphertext");
+    expect(response.body.data).not.toHaveProperty("created_by");
     expect(response.body.data.downloads).toEqual({ pdf: "blocked", xml: "blocked" });
   });
 
@@ -106,9 +114,11 @@ describe("public protocol contracts", () => {
 
   it("does not log request bodies or protocol values", async () => {
     const { app, logs } = setup();
-    await request(app).post("/api/v1/protocols/lookup").send({ protocol });
+    const response = await request(app).post("/api/v1/protocols/lookup").set("x-request-id", protocol).send({ protocol });
     expect(JSON.stringify(logs)).not.toContain(protocol);
     expect(JSON.stringify(logs)).not.toContain("Samara");
+    expect(response.headers["x-request-id"]).not.toBe(protocol);
+    expect(response.headers["x-request-id"]).toMatch(/^[0-9a-f-]{36}$/i);
   });
 
   it("rate limits repeated public lookup attempts", async () => {
@@ -147,6 +157,19 @@ describe("admin contracts", () => {
     expect(response.status).toBe(200);
     expect(response.body.data[0].protocol).toBe(protocol);
     expect(response.body.data[0]).not.toHaveProperty("protocol_ciphertext");
+    expect(response.headers["cache-control"]).toBe("private, no-store");
+  });
+
+  it("marks every authenticated administrative record response as private and no-store", async () => {
+    const { app, repository } = setup();
+    const authorization = { authorization: "Bearer valid" };
+    const list = await request(app).get("/api/v1/admin/records").set(authorization);
+    const detail = await request(app).get(`/api/v1/admin/records/${repository.records[0].id}`).set(authorization);
+    const updated = await request(app).patch(`/api/v1/admin/records/${repository.records[0].id}`).set(authorization).send({ status: "archived" });
+    for (const response of [list, detail, updated]) {
+      expect(response.status).toBe(200);
+      expect(response.headers["cache-control"]).toBe("private, no-store");
+    }
   });
 
   it("archives a record and removes it from public lookup", async () => {
@@ -159,6 +182,20 @@ describe("admin contracts", () => {
     expect(archived.body.data.status).toBe("archived");
     const lookup = await request(app).post("/api/v1/protocols/lookup").send({ protocol });
     expect(lookup.status).toBe(404);
+  });
+
+  it("blocks and unblocks a record through the existing status contract", async () => {
+    const { app, repository } = setup();
+    const recordPath = `/api/v1/admin/records/${repository.records[0].id}`;
+    expect((await request(app).patch(recordPath).send({ status: "archived" })).status).toBe(401);
+    expect((await request(app).patch(recordPath).set("authorization", "Bearer invalid").send({ status: "archived" })).status).toBe(403);
+    expect((await request(app).patch(recordPath).set("authorization", "Bearer valid").send({ status: "blocked" })).status).toBe(400);
+    expect((await request(app).patch(recordPath).set("authorization", "Bearer valid").send({ status: "archived" })).status).toBe(200);
+    expect((await request(app).post("/api/v1/protocols/lookup").send({ protocol })).status).toBe(404);
+    const unblocked = await request(app).patch(recordPath).set("authorization", "Bearer valid").send({ status: "active" });
+    expect(unblocked.status).toBe(200);
+    expect(unblocked.body.data.status).toBe("active");
+    expect((await request(app).post("/api/v1/protocols/lookup").send({ protocol })).status).toBe(200);
   });
 });
 
@@ -182,7 +219,7 @@ describe("branding contracts", () => {
     expect(uploaded.body.data.logoUrl).toContain("logo");
   });
 
-  it("lets an admin restore the default textual brand", async () => {
+  it("lets an admin remove the logo and leave the brand area blank", async () => {
     const { app, brandStore } = setup();
     brandStore.logoUrl = "https://cdn.example/logo?v=1";
     const response = await request(app).delete("/api/v1/admin/branding/logo").set("authorization", "Bearer valid");

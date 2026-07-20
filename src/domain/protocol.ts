@@ -40,37 +40,16 @@ export function decryptProtocol(payload: string, pepper: string): string {
   return Buffer.concat([decipher.update(Buffer.from(encrypted, "base64url")), decipher.final()]).toString("utf8");
 }
 
-function maskName(value: string | null): string | null {
-  if (!value) return null;
-  return value
-    .trim()
-    .split(/\s+/)
-    .map((part) => {
-      if (part.length <= 2) return `${part[0] ?? ""}*`;
-      return `${part.slice(0, 2)}${"*".repeat(Math.min(part.length - 2, 6))}`;
-    })
-    .join(" ");
-}
-
-function maskDocument(value: string): string {
-  const compact = value.replace(/\s/g, "");
-  return `***${compact.slice(-4)}`;
-}
-
-function maskDate(value: string): string {
-  const [year] = value.split("-");
-  return `**/**/${year}`;
-}
-
 export function toPublicRecord(record: EducationRecord): PublicRecord {
   return {
+    consultedAt: new Date().toISOString(),
     student: {
-      name: maskName(record.student_name) ?? "",
-      birthDate: maskDate(record.birth_date),
+      name: record.student_name,
+      birthDate: record.birth_date,
       documentType: record.document_type,
-      documentNumber: maskDocument(record.document_number),
-      motherName: maskName(record.mother_name),
-      fatherName: maskName(record.father_name),
+      documentNumber: record.document_number,
+      motherName: record.mother_name,
+      fatherName: record.father_name,
       educationLevel: record.education_level,
       completionDate: record.completion_date,
       notes: record.notes

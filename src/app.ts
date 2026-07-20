@@ -24,6 +24,8 @@ function errorBody(code: string, message: string, requestId: string) {
   return { error: { code, message, requestId } };
 }
 
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 function toAdminRecord<T extends { protocol_hash: string; protocol_ciphertext: string | null; created_by: string }>(record: T, pepper: string) {
   const { protocol_hash: _protocolHash, protocol_ciphertext: protocolCiphertext, created_by: _createdBy, ...safeRecord } = record;
   return { ...safeRecord, protocol: protocolCiphertext ? decryptProtocol(protocolCiphertext, pepper) : null };
@@ -37,7 +39,8 @@ export function createApp(deps: AppDependencies) {
   app.use(cors({ origin: deps.allowedOrigins?.length ? deps.allowedOrigins : false, methods: ["GET", "POST", "PUT", "PATCH", "DELETE"] }));
   app.use(express.json({ limit: "16kb" }));
   app.use((req, res, next) => {
-    const requestId = req.header("x-request-id")?.slice(0, 80) || randomUUID();
+    const incomingRequestId = req.header("x-request-id")?.trim();
+    const requestId = incomingRequestId && uuidPattern.test(incomingRequestId) ? incomingRequestId : randomUUID();
     res.locals.requestId = requestId;
     res.setHeader("x-request-id", requestId);
     const started = Date.now();
@@ -58,6 +61,7 @@ export function createApp(deps: AppDependencies) {
     const userId = await deps.authorizeAdmin(req.header("authorization"));
     if (!userId) return res.status(req.header("authorization") ? 403 : 401).json(errorBody("ADMIN_REQUIRED", "Acesso administrativo necessário.", res.locals.requestId));
     res.locals.adminUserId = userId;
+    res.setHeader("cache-control", "private, no-store");
     next();
   };
 
@@ -113,6 +117,7 @@ export function createApp(deps: AppDependencies) {
       const { protocol } = protocolSchema.parse(req.body);
       const record = await deps.repository.findActiveByProtocolHash(hashProtocol(protocol, deps.protocolPepper));
       if (!record) return res.status(404).json(errorBody("PROTOCOL_NOT_FOUND", "Protocolo não encontrado.", res.locals.requestId));
+      res.setHeader("cache-control", "private, no-store");
       return res.json({ data: toPublicRecord(record) });
     } catch (error) { next(error); }
   });
