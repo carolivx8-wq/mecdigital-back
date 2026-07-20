@@ -49,6 +49,10 @@ export const listQuerySchema = z.object({
 
 export const recordIdSchema = z.uuid();
 
+export const publicLinkTokenSchema = z.object({
+  token: z.string().regex(/^[A-Za-z0-9_-]{43}$/, "Link público inválido")
+});
+
 export const brandingLinkSchema = z.object({
   logoLink: z.string().trim().url().refine((value) => ["http:", "https:"].includes(new URL(value).protocol), "Link inválido").nullable()
 });

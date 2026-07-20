@@ -1,19 +1,28 @@
 import request from "supertest";
+import sharp from "sharp";
 import { describe, expect, it } from "vitest";
 import { createApp } from "../src/app.js";
 import type { BrandStore } from "../src/branding.js";
 import { encryptProtocol, hashProtocol } from "../src/domain/protocol.js";
+import { encryptPublicLinkToken, generatePublicLinkToken, hashPublicLinkToken } from "../src/domain/public-link.js";
 import type { RecordRepository } from "../src/repository.js";
+import type { ProfilePhotoStore } from "../src/profile-photo.js";
 import type { CreateRecordInput, EducationRecord, UpdateRecordInput } from "../src/types.js";
 
 const pepper = "test-pepper-with-more-than-thirty-two-characters";
 const protocol = "MEC-0123456789ABCDEF01234567";
+const publicLinkSecret = "public-link-secret-with-more-than-thirty-two-characters";
+const webpFixture = () => sharp({ create: { width: 40, height: 40, channels: 3, background: "#224466" } }).webp().toBuffer();
 
 function fixture(overrides: Partial<EducationRecord> = {}): EducationRecord {
   return {
     id: "6d08350c-5263-4d83-9471-4b5f25246eef",
     protocol_hash: hashProtocol(protocol, pepper),
     protocol_ciphertext: encryptProtocol(protocol, pepper),
+    public_link_token_hash: null,
+    public_link_token_ciphertext: null,
+    public_link_created_at: null,
+    profile_photo_path: null,
     status: "active",
     student_name: "Samara Maria Teixeira Fernandes",
     birth_date: "1979-03-16",
@@ -39,10 +48,23 @@ class MemoryRepository implements RecordRepository {
   records = [fixture()];
   async findByProtocolHash(hash: string) { return this.records.find((item) => item.protocol_hash === hash) ?? null; }
   async findActiveByProtocolHash(hash: string) { return this.records.find((item) => item.protocol_hash === hash && item.status === "active") ?? null; }
+  async findByPublicLinkTokenHash(hash: string) { return this.records.find((item) => item.public_link_token_hash === hash) ?? null; }
   async create(input: CreateRecordInput, protocolHash: string, protocolCiphertext: string, userId: string) { const record = fixture({ ...input, protocol_hash: protocolHash, protocol_ciphertext: protocolCiphertext, created_by: userId }); this.records.push(record); return record; }
   async list(_page: number, _pageSize: number, search: string) { const items = this.records.filter((item) => item.student_name.toLowerCase().includes(search.toLowerCase())); return { items, total: items.length }; }
   async findById(id: string) { return this.records.find((item) => item.id === id) ?? null; }
   async update(id: string, input: UpdateRecordInput) { const found = await this.findById(id); if (!found) return null; Object.assign(found, input); return found; }
+  async setPublicLink(id: string, tokenHash: string, tokenCiphertext: string, createdAt: string, expectedHash: string | null) { const found = await this.findById(id); if (!found || found.public_link_token_hash !== expectedHash) return null; Object.assign(found, { public_link_token_hash: tokenHash, public_link_token_ciphertext: tokenCiphertext, public_link_created_at: createdAt }); return found; }
+  async revokePublicLink(id: string) { const found = await this.findById(id); if (!found) return null; Object.assign(found, { public_link_token_hash: null, public_link_token_ciphertext: null, public_link_created_at: null }); return found; }
+  async setProfilePhotoPath(id: string, path: string | null) { const found = await this.findById(id); if (!found) return null; found.profile_photo_path = path; return found; }
+}
+
+class MemoryProfilePhotoStore implements ProfilePhotoStore {
+  files = new Map<string, Buffer>();
+  failRemove = false;
+  failSignedUrl = false;
+  async upload(recordId: string, bytes: Buffer) { const path = `${recordId}/11111111-1111-4111-8111-111111111111.webp`; this.files.set(path, bytes); return path; }
+  async remove(path: string) { if (this.failRemove) throw new Error("storage remove failed"); this.files.delete(path); }
+  async createSignedUrl(path: string) { if (this.failSignedUrl) throw new Error("sign failed"); return `https://signed.example/${path}?token=short-lived`; }
 }
 
 class MemoryBrandStore implements BrandStore {
@@ -58,17 +80,168 @@ function setup(admin = true) {
   const repository = new MemoryRepository();
   const logs: Record<string, unknown>[] = [];
   const brandStore = new MemoryBrandStore();
+  const profilePhotoStore = new MemoryProfilePhotoStore();
   const app = createApp({
     repository,
     brandStore,
+    profilePhotoStore,
     authorizeAdmin: async (header) => header === "Bearer valid" && admin ? "admin-1" : null,
     protocolPepper: pepper,
+    publicLinkSecret,
+    publicWebUrl: "https://portal-mec.digital",
     protocolGenerator: () => protocol,
     allowedOrigins: ["http://localhost:3000"],
     log: (entry) => logs.push(entry)
   });
-  return { app, repository, brandStore, logs };
+  return { app, repository, brandStore, profilePhotoStore, logs };
 }
+
+describe("public link contracts", () => {
+  it("generates a persistent link, resolves it, rotates it and revokes it", async () => {
+    const { app, repository } = setup();
+    const recordPath = `/api/v1/admin/records/${repository.records[0].id}/public-link`;
+    const authorization = { authorization: "Bearer valid" };
+
+    const generated = await request(app).put(recordPath).set(authorization);
+    expect(generated.status).toBe(200);
+    expect(generated.body.data.url).toMatch(/^https?:\/\/.+\/registro\/compartilhado#/);
+    const token = new URL(generated.body.data.url).hash.slice(1);
+    expect(Buffer.from(token, "base64url")).toHaveLength(32);
+    expect(generated.body.data.url).not.toContain(protocol);
+    expect(repository.records[0].public_link_token_hash).toBe(hashPublicLinkToken(token, publicLinkSecret));
+    expect(repository.records[0].public_link_token_ciphertext).not.toContain(token);
+
+    const repeated = await request(app).put(recordPath).set(authorization);
+    expect(repeated.body.data.url).toBe(generated.body.data.url);
+
+    const resolved = await request(app).post("/api/v1/public-links/resolve").send({ token });
+    expect(resolved.status).toBe(200);
+    expect(resolved.body.data.student.name).toBe("Samara Maria Teixeira Fernandes");
+    expect(resolved.headers["cache-control"]).toBe("private, no-store");
+
+    const rotated = await request(app).post(`${recordPath}/rotate`).set(authorization);
+    const rotatedToken = new URL(rotated.body.data.url).hash.slice(1);
+    expect(rotatedToken).not.toBe(token);
+    expect((await request(app).post("/api/v1/public-links/resolve").send({ token })).status).toBe(404);
+    expect((await request(app).post("/api/v1/public-links/resolve").send({ token: rotatedToken })).status).toBe(200);
+
+    expect((await request(app).delete(recordPath).set(authorization)).status).toBe(204);
+    expect((await request(app).post("/api/v1/public-links/resolve").send({ token: rotatedToken })).status).toBe(404);
+    expect((await request(app).delete(recordPath).set(authorization)).status).toBe(204);
+  });
+
+  it("blocks a valid public link without returning personal data", async () => {
+    const { app, repository } = setup();
+    const token = generatePublicLinkToken();
+    await repository.setPublicLink(repository.records[0].id, hashPublicLinkToken(token, publicLinkSecret), encryptPublicLinkToken(token, publicLinkSecret), new Date().toISOString(), null);
+    repository.records[0].status = "archived";
+    const response = await request(app).post("/api/v1/public-links/resolve").send({ token });
+    expect(response.status).toBe(423);
+    expect(response.body.error.code).toBe("PROTOCOL_BLOCKED");
+    expect(response.body).not.toHaveProperty("data");
+  });
+
+  it("protects public-link administration", async () => {
+    const { app, repository } = setup();
+    const path = `/api/v1/admin/records/${repository.records[0].id}/public-link`;
+    expect((await request(app).put(path)).status).toBe(401);
+    expect((await request(app).put(path).set("authorization", "Bearer invalid")).status).toBe(403);
+  });
+
+  it("returns the same not-found contract for malformed and unknown public tokens", async () => {
+    const { app } = setup();
+    const malformed = await request(app).post("/api/v1/public-links/resolve").send({ token: "curto" });
+    const unknown = await request(app).post("/api/v1/public-links/resolve").send({ token: "A".repeat(43) });
+    expect(malformed.status).toBe(404);
+    expect(unknown.status).toBe(404);
+    expect(malformed.body.error.code).toBe("PUBLIC_LINK_NOT_FOUND");
+    expect(unknown.body.error.code).toBe("PUBLIC_LINK_NOT_FOUND");
+  });
+
+  it("returns the single persisted link for concurrent generation", async () => {
+    const { app, repository } = setup();
+    const path = `/api/v1/admin/records/${repository.records[0].id}/public-link`;
+    const [first, second] = await Promise.all([
+      request(app).put(path).set("authorization", "Bearer valid"),
+      request(app).put(path).set("authorization", "Bearer valid")
+    ]);
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(first.body.data.url).toBe(second.body.data.url);
+    const token = new URL(first.body.data.url).hash.slice(1);
+    expect((await request(app).post("/api/v1/public-links/resolve").send({ token })).status).toBe(200);
+  });
+});
+
+describe("profile photo contracts", () => {
+  it("uploads, signs, exposes and removes a private profile photo", async () => {
+    const { app, repository, profilePhotoStore } = setup();
+    const path = `/api/v1/admin/records/${repository.records[0].id}/profile-photo`;
+    const uploaded = await request(app).put(path).set("authorization", "Bearer valid").set("content-type", "image/webp").send(await webpFixture());
+    expect(uploaded.status).toBe(200);
+    expect(uploaded.body.data.profilePhotoUrl).toContain("https://signed.example/");
+    expect(repository.records[0].profile_photo_path).toMatch(/\.webp$/);
+    expect(profilePhotoStore.files.size).toBe(1);
+
+    const lookup = await request(app).post("/api/v1/protocols/lookup").send({ protocol });
+    expect(lookup.body.data.student.profilePhotoUrl).toContain("https://signed.example/");
+    expect(lookup.body.data).not.toHaveProperty("profile_photo_path");
+
+    expect((await request(app).delete(path).set("authorization", "Bearer valid")).status).toBe(204);
+    expect(repository.records[0].profile_photo_path).toBeNull();
+    expect(profilePhotoStore.files.size).toBe(0);
+  });
+
+  it("rejects unauthorized and invalid profile photos", async () => {
+    const { app, repository } = setup();
+    const path = `/api/v1/admin/records/${repository.records[0].id}/profile-photo`;
+    expect((await request(app).put(path).set("content-type", "image/webp").send(await webpFixture())).status).toBe(401);
+    expect((await request(app).put(path).set("authorization", "Bearer valid").set("content-type", "image/webp").send(Buffer.from("not-webp"))).status).toBe(415);
+  });
+
+  it("keeps the new photo consistent when old-object cleanup fails", async () => {
+    const { app, repository, profilePhotoStore, logs } = setup();
+    const oldPath = `${repository.records[0].id}/00000000-0000-4000-8000-000000000000.webp`;
+    repository.records[0].profile_photo_path = oldPath;
+    profilePhotoStore.files.set(oldPath, Buffer.from("old"));
+    profilePhotoStore.failRemove = true;
+    const path = `/api/v1/admin/records/${repository.records[0].id}/profile-photo`;
+
+    const response = await request(app).put(path).set("authorization", "Bearer valid").set("content-type", "image/webp").send(await webpFixture());
+
+    expect(response.status).toBe(200);
+    expect(repository.records[0].profile_photo_path).not.toBe(oldPath);
+    expect(profilePhotoStore.files.has(repository.records[0].profile_photo_path!)).toBe(true);
+    expect(logs).toContainEqual(expect.objectContaining({ event: "profile_photo_cleanup_failed" }));
+  });
+
+  it("does not delete a persisted new photo when URL signing fails", async () => {
+    const { app, repository, profilePhotoStore } = setup();
+    profilePhotoStore.failSignedUrl = true;
+    const path = `/api/v1/admin/records/${repository.records[0].id}/profile-photo`;
+
+    const response = await request(app).put(path).set("authorization", "Bearer valid").set("content-type", "image/webp").send(await webpFixture());
+
+    expect(response.status).toBe(500);
+    expect(repository.records[0].profile_photo_path).toMatch(/\.webp$/);
+    expect(profilePhotoStore.files.has(repository.records[0].profile_photo_path!)).toBe(true);
+  });
+
+  it("finishes deletion coherently and logs when storage cleanup fails", async () => {
+    const { app, repository, profilePhotoStore, logs } = setup();
+    const oldPath = `${repository.records[0].id}/00000000-0000-4000-8000-000000000000.webp`;
+    repository.records[0].profile_photo_path = oldPath;
+    profilePhotoStore.files.set(oldPath, Buffer.from("old"));
+    profilePhotoStore.failRemove = true;
+    const path = `/api/v1/admin/records/${repository.records[0].id}/profile-photo`;
+
+    const response = await request(app).delete(path).set("authorization", "Bearer valid");
+
+    expect(response.status).toBe(204);
+    expect(repository.records[0].profile_photo_path).toBeNull();
+    expect(logs).toContainEqual(expect.objectContaining({ event: "profile_photo_cleanup_failed" }));
+  });
+});
 
 describe("public protocol contracts", () => {
   it("returns the approved public fields in full with a consultation timestamp and no-store", async () => {
@@ -153,7 +326,7 @@ describe("admin contracts", () => {
   it("creates a record and reveals the protocol once", async () => {
     const { app } = setup();
     const source = fixture();
-    const { id, protocol_hash, protocol_ciphertext, status, created_at, updated_at, created_by, ...input } = source;
+    const { id, protocol_hash, protocol_ciphertext, public_link_token_hash, public_link_token_ciphertext, public_link_created_at, profile_photo_path, status, created_at, updated_at, created_by, ...input } = source;
     const response = await request(app).post("/api/v1/admin/records").set("authorization", "Bearer valid").send(input);
     expect(response.status).toBe(201);
     expect(response.body.data.protocol).toBe(protocol);

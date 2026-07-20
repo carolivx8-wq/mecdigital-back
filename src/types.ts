@@ -10,6 +10,10 @@ export interface EducationRecord {
   id: string;
   protocol_hash: string;
   protocol_ciphertext: string | null;
+  public_link_token_hash: string | null;
+  public_link_token_ciphertext: string | null;
+  public_link_created_at: string | null;
+  profile_photo_path: string | null;
   status: RecordStatus;
   student_name: string;
   birth_date: string;
@@ -31,7 +35,7 @@ export interface EducationRecord {
 
 export type CreateRecordInput = Omit<
   EducationRecord,
-  "id" | "protocol_hash" | "protocol_ciphertext" | "status" | "created_at" | "updated_at" | "created_by"
+  "id" | "protocol_hash" | "protocol_ciphertext" | "public_link_token_hash" | "public_link_token_ciphertext" | "public_link_created_at" | "profile_photo_path" | "status" | "created_at" | "updated_at" | "created_by"
 >;
 
 export type UpdateRecordInput = Partial<CreateRecordInput> & { status?: RecordStatus };
@@ -40,6 +44,7 @@ export interface PublicRecord {
   consultedAt: string;
   student: {
     name: string;
+    profilePhotoUrl: string | null;
     birthDate: string;
     documentType: EducationRecord["document_type"];
     documentNumber: string;

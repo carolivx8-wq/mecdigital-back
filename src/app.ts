@@ -7,14 +7,19 @@ import { ZodError } from "zod";
 import type { AuthorizeAdmin } from "./auth.js";
 import type { BrandStore } from "./branding.js";
 import { decryptProtocol, encryptProtocol, generateProtocol, hashProtocol, toPublicRecord } from "./domain/protocol.js";
+import { decryptPublicLinkToken, encryptPublicLinkToken, generatePublicLinkToken, hashPublicLinkToken } from "./domain/public-link.js";
 import type { RecordRepository } from "./repository.js";
-import { brandingLinkSchema, downloadAttemptSchema, listQuerySchema, protocolSchema, recordIdSchema, recordInputSchema, recordPatchSchema } from "./schemas.js";
+import { isWebP, normalizeProfilePhoto, type ProfilePhotoStore } from "./profile-photo.js";
+import { brandingLinkSchema, downloadAttemptSchema, listQuerySchema, protocolSchema, publicLinkTokenSchema, recordIdSchema, recordInputSchema, recordPatchSchema } from "./schemas.js";
 
 interface AppDependencies {
   repository: RecordRepository;
+  profilePhotoStore?: ProfilePhotoStore;
   brandStore?: BrandStore;
   authorizeAdmin: AuthorizeAdmin;
   protocolPepper: string;
+  publicLinkSecret: string;
+  publicWebUrl?: string;
   allowedOrigins?: string[];
   protocolGenerator?: () => string;
   log?: (entry: Record<string, unknown>) => void;
@@ -26,9 +31,18 @@ function errorBody(code: string, message: string, requestId: string) {
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-function toAdminRecord<T extends { protocol_hash: string; protocol_ciphertext: string | null; created_by: string }>(record: T, pepper: string) {
-  const { protocol_hash: _protocolHash, protocol_ciphertext: protocolCiphertext, created_by: _createdBy, ...safeRecord } = record;
-  return { ...safeRecord, protocol: protocolCiphertext ? decryptProtocol(protocolCiphertext, pepper) : null };
+function publicLinkUrl(token: string, publicWebUrl: string) {
+  return `${publicWebUrl.replace(/\/$/, "")}/registro/compartilhado#${token}`;
+}
+
+function toAdminRecord<T extends { protocol_hash: string; protocol_ciphertext: string | null; public_link_token_hash: string | null; public_link_token_ciphertext: string | null; profile_photo_path: string | null; created_by: string }>(record: T, deps: Pick<AppDependencies, "protocolPepper" | "publicLinkSecret" | "publicWebUrl">, profilePhotoUrl: string | null = null) {
+  const { protocol_hash: _protocolHash, protocol_ciphertext: protocolCiphertext, public_link_token_hash: _publicLinkTokenHash, public_link_token_ciphertext: publicLinkTokenCiphertext, profile_photo_path: _profilePhotoPath, created_by: _createdBy, ...safeRecord } = record;
+  return {
+    ...safeRecord,
+    protocol: protocolCiphertext ? decryptProtocol(protocolCiphertext, deps.protocolPepper) : null,
+    publicLinkAvailable: Boolean(publicLinkTokenCiphertext),
+    profilePhotoUrl
+  };
 }
 
 export function createApp(deps: AppDependencies) {
@@ -64,6 +78,8 @@ export function createApp(deps: AppDependencies) {
     res.setHeader("cache-control", "private, no-store");
     next();
   };
+  const signedProfilePhoto = async (record: { profile_photo_path: string | null }) =>
+    record.profile_photo_path && deps.profilePhotoStore ? deps.profilePhotoStore.createSignedUrl(record.profile_photo_path) : null;
 
   app.get("/api/v1/health", (_req, res) => res.json({ status: "ok" }));
 
@@ -77,6 +93,12 @@ export function createApp(deps: AppDependencies) {
 
   app.use("/api/v1/protocols", (_req, res, next) => {
     res.setHeader("cache-control", "private, no-store");
+    next();
+  });
+  app.use("/api/v1/public-links", (_req, res, next) => {
+    res.setHeader("cache-control", "private, no-store");
+    res.setHeader("referrer-policy", "no-referrer");
+    res.setHeader("x-robots-tag", "noindex, nofollow, noarchive, nosnippet");
     next();
   });
 
@@ -126,7 +148,7 @@ export function createApp(deps: AppDependencies) {
         if (blockedRecord?.status === "archived") return res.status(423).json(errorBody("PROTOCOL_BLOCKED", "Protocolo bloqueado temporariamente! Consulte sua instituição!", res.locals.requestId));
         return res.status(404).json(errorBody("PROTOCOL_NOT_FOUND", "Protocolo não encontrado.", res.locals.requestId));
       }
-      return res.json({ data: toPublicRecord(record) });
+      return res.json({ data: toPublicRecord(record, await signedProfilePhoto(record)) });
     } catch (error) { next(error); }
   });
 
@@ -139,12 +161,24 @@ export function createApp(deps: AppDependencies) {
     } catch (error) { next(error); }
   });
 
+  app.post("/api/v1/public-links/resolve", publicLimiter, async (req, res, next) => {
+    try {
+      const parsed = publicLinkTokenSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(404).json(errorBody("PUBLIC_LINK_NOT_FOUND", "Link público inválido ou revogado.", res.locals.requestId));
+      const { token } = parsed.data;
+      const record = await deps.repository.findByPublicLinkTokenHash(hashPublicLinkToken(token, deps.publicLinkSecret));
+      if (!record) return res.status(404).json(errorBody("PUBLIC_LINK_NOT_FOUND", "Link público inválido ou revogado.", res.locals.requestId));
+      if (record.status === "archived") return res.status(423).json(errorBody("PROTOCOL_BLOCKED", "Registro bloqueado temporariamente! Consulte sua instituição!", res.locals.requestId));
+      return res.json({ data: toPublicRecord(record, await signedProfilePhoto(record)) });
+    } catch (error) { next(error); }
+  });
+
   app.post("/api/v1/admin/records", requireAdmin, async (req, res, next) => {
     try {
       const input = recordInputSchema.parse(req.body);
       const protocol = (deps.protocolGenerator ?? generateProtocol)();
       const record = await deps.repository.create(input, hashProtocol(protocol, deps.protocolPepper), encryptProtocol(protocol, deps.protocolPepper), res.locals.adminUserId);
-      return res.status(201).json({ data: { record: toAdminRecord(record, deps.protocolPepper), protocol } });
+      return res.status(201).json({ data: { record: toAdminRecord(record, deps, await signedProfilePhoto(record)), protocol } });
     } catch (error) { next(error); }
   });
 
@@ -152,7 +186,7 @@ export function createApp(deps: AppDependencies) {
     try {
       const query = listQuerySchema.parse(req.query);
       const result = await deps.repository.list(query.page, query.pageSize, query.search);
-      return res.json({ data: result.items.map((record) => toAdminRecord(record, deps.protocolPepper)), meta: { page: query.page, pageSize: query.pageSize, total: result.total } });
+      return res.json({ data: await Promise.all(result.items.map(async (record) => toAdminRecord(record, deps, await signedProfilePhoto(record)))), meta: { page: query.page, pageSize: query.pageSize, total: result.total } });
     } catch (error) { next(error); }
   });
 
@@ -160,7 +194,7 @@ export function createApp(deps: AppDependencies) {
     try {
       const record = await deps.repository.findById(recordIdSchema.parse(String(req.params.id)));
       if (!record) return res.status(404).json(errorBody("RECORD_NOT_FOUND", "Registro não encontrado.", res.locals.requestId));
-      return res.json({ data: toAdminRecord(record, deps.protocolPepper) });
+      return res.json({ data: toAdminRecord(record, deps, await signedProfilePhoto(record)) });
     } catch (error) { next(error); }
   });
 
@@ -169,14 +203,121 @@ export function createApp(deps: AppDependencies) {
       const input = recordPatchSchema.parse(req.body);
       const record = await deps.repository.update(recordIdSchema.parse(String(req.params.id)), input);
       if (!record) return res.status(404).json(errorBody("RECORD_NOT_FOUND", "Registro não encontrado.", res.locals.requestId));
-      return res.json({ data: toAdminRecord(record, deps.protocolPepper) });
+      return res.json({ data: toAdminRecord(record, deps, await signedProfilePhoto(record)) });
+    } catch (error) { next(error); }
+  });
+
+  app.put(
+    "/api/v1/admin/records/:id/profile-photo",
+    requireAdmin,
+    express.raw({ type: "image/webp", limit: "1mb" }),
+    async (req, res, next) => {
+      try {
+        if (!deps.profilePhotoStore) return res.status(503).json(errorBody("PHOTO_STORAGE_UNAVAILABLE", "Armazenamento de foto indisponível.", res.locals.requestId));
+        const id = recordIdSchema.parse(String(req.params.id));
+        const current = await deps.repository.findById(id);
+        if (!current) return res.status(404).json(errorBody("RECORD_NOT_FOUND", "Registro não encontrado.", res.locals.requestId));
+        if (!Buffer.isBuffer(req.body) || !isWebP(req.body)) return res.status(415).json(errorBody("INVALID_PROFILE_PHOTO", "Envie uma imagem WebP válida.", res.locals.requestId));
+        const oldPath = current.profile_photo_path;
+        const normalized = await normalizeProfilePhoto(req.body);
+        const newPath = await deps.profilePhotoStore.upload(id, normalized);
+        let persisted = false;
+        try {
+          const updated = await deps.repository.setProfilePhotoPath(id, newPath);
+          if (!updated) throw new Error("Record disappeared during profile photo update");
+          persisted = true;
+        } catch (error) {
+          await deps.profilePhotoStore.remove(newPath).catch(() => undefined);
+          throw error;
+        }
+        if (oldPath) {
+          await deps.profilePhotoStore.remove(oldPath).catch((error: unknown) => {
+            (deps.log ?? console.error)({
+              level: "error",
+              event: "profile_photo_cleanup_failed",
+              requestId: res.locals.requestId,
+              errorType: error instanceof Error ? error.name : "unknown"
+            });
+          });
+        }
+        if (!persisted) throw new Error("Profile photo was not persisted");
+        return res.json({ data: { profilePhotoUrl: await deps.profilePhotoStore.createSignedUrl(newPath) } });
+      } catch (error) { next(error); }
+    }
+  );
+
+  app.delete("/api/v1/admin/records/:id/profile-photo", requireAdmin, async (req, res, next) => {
+    try {
+      if (!deps.profilePhotoStore) return res.status(503).json(errorBody("PHOTO_STORAGE_UNAVAILABLE", "Armazenamento de foto indisponível.", res.locals.requestId));
+      const id = recordIdSchema.parse(String(req.params.id));
+      const current = await deps.repository.findById(id);
+      if (!current) return res.status(404).json(errorBody("RECORD_NOT_FOUND", "Registro não encontrado.", res.locals.requestId));
+      const oldPath = current.profile_photo_path;
+      await deps.repository.setProfilePhotoPath(id, null);
+      if (oldPath) {
+        await deps.profilePhotoStore.remove(oldPath).catch((error: unknown) => {
+          (deps.log ?? console.error)({
+            level: "error",
+            event: "profile_photo_cleanup_failed",
+            requestId: res.locals.requestId,
+            errorType: error instanceof Error ? error.name : "unknown"
+          });
+        });
+      }
+      return res.status(204).send();
+    } catch (error) { next(error); }
+  });
+
+  async function writePublicLink(recordId: string, rotate: boolean, res: Response) {
+    const current = await deps.repository.findById(recordId);
+    if (!current) return res.status(404).json(errorBody("RECORD_NOT_FOUND", "Registro não encontrado.", res.locals.requestId));
+    if (!rotate && current.public_link_token_ciphertext) {
+      const token = decryptPublicLinkToken(current.public_link_token_ciphertext, deps.publicLinkSecret);
+      return res.json({ data: { url: publicLinkUrl(token, deps.publicWebUrl ?? "http://localhost:3000"), createdAt: current.public_link_created_at } });
+    }
+    const expectedHash = current.public_link_token_hash;
+    const token = generatePublicLinkToken();
+    const createdAt = new Date().toISOString();
+    const updated = await deps.repository.setPublicLink(recordId, hashPublicLinkToken(token, deps.publicLinkSecret), encryptPublicLinkToken(token, deps.publicLinkSecret), createdAt, expectedHash);
+    if (!updated) {
+      const winner = await deps.repository.findById(recordId);
+      if (!winner?.public_link_token_ciphertext) return res.status(409).json(errorBody("PUBLIC_LINK_CONFLICT", "O link foi alterado por outra solicitação. Tente novamente.", res.locals.requestId));
+      const winnerToken = decryptPublicLinkToken(winner.public_link_token_ciphertext, deps.publicLinkSecret);
+      return res.json({ data: { url: publicLinkUrl(winnerToken, deps.publicWebUrl ?? "http://localhost:3000"), createdAt: winner.public_link_created_at } });
+    }
+    return res.json({ data: { url: publicLinkUrl(token, deps.publicWebUrl ?? "http://localhost:3000"), createdAt } });
+  }
+
+  app.put("/api/v1/admin/records/:id/public-link", requireAdmin, async (req, res, next) => {
+    try { return await writePublicLink(recordIdSchema.parse(String(req.params.id)), false, res); }
+    catch (error) { next(error); }
+  });
+
+  app.post("/api/v1/admin/records/:id/public-link/rotate", requireAdmin, async (req, res, next) => {
+    try { return await writePublicLink(recordIdSchema.parse(String(req.params.id)), true, res); }
+    catch (error) { next(error); }
+  });
+
+  app.delete("/api/v1/admin/records/:id/public-link", requireAdmin, async (req, res, next) => {
+    try {
+      const id = recordIdSchema.parse(String(req.params.id));
+      const current = await deps.repository.findById(id);
+      if (!current) return res.status(404).json(errorBody("RECORD_NOT_FOUND", "Registro não encontrado.", res.locals.requestId));
+      await deps.repository.revokePublicLink(id);
+      return res.status(204).send();
     } catch (error) { next(error); }
   });
 
   app.use((_req, res) => res.status(404).json(errorBody("ROUTE_NOT_FOUND", "Rota não encontrada.", res.locals.requestId ?? randomUUID())));
   app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
     if (typeof error === "object" && error && "status" in error && error.status === 413) {
-      return res.status(413).json(errorBody("IMAGE_TOO_LARGE", "A imagem deve ter no maximo 2 MB.", res.locals.requestId));
+      return res.status(413).json(errorBody("IMAGE_TOO_LARGE", "A imagem deve ter no máximo 1 MB.", res.locals.requestId));
+    }
+    if (error instanceof Error && error.message === "PROFILE_PHOTO_TOO_LARGE") {
+      return res.status(413).json(errorBody("PROFILE_PHOTO_TOO_LARGE", "A foto processada deve ter no máximo 1 MB.", res.locals.requestId));
+    }
+    if (error instanceof Error && error.message === "INVALID_PROFILE_PHOTO") {
+      return res.status(415).json(errorBody("INVALID_PROFILE_PHOTO", "Envie uma imagem WebP válida.", res.locals.requestId));
     }
     if (error instanceof ZodError) return res.status(400).json({ ...errorBody("VALIDATION_ERROR", "Dados inválidos.", res.locals.requestId), details: error.issues.map((issue) => ({ path: issue.path.join("."), message: issue.message })) });
     const databaseCode = typeof error === "object" && error && "code" in error ? String(error.code) : "";

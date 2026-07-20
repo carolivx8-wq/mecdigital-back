@@ -41,12 +41,13 @@ export function decryptProtocol(payload: string, pepper: string): string {
   return Buffer.concat([decipher.update(Buffer.from(encrypted, "base64url")), decipher.final()]).toString("utf8");
 }
 
-export function toPublicRecord(record: EducationRecord): PublicRecord {
+export function toPublicRecord(record: EducationRecord, profilePhotoUrl: string | null = null): PublicRecord {
   const additionalDocuments = educationDocumentsSchema.parse(record.additional_documents ?? []);
   return {
     consultedAt: new Date().toISOString(),
     student: {
       name: record.student_name,
+      profilePhotoUrl,
       birthDate: record.birth_date,
       documentType: record.document_type,
       documentNumber: record.document_number,
